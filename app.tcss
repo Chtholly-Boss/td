@@ -1,0 +1,29 @@
+Screen {
+    layout: vertical;
+}
+
+#status, #help {
+    height: 1;
+    padding: 0 1;
+}
+
+DataTable {
+    height: 1fr;
+}
+
+InputScreen, DTypeScreen {
+    align: center middle;
+}
+
+#dialog {
+    width: 60;
+    height: auto;
+    background: $surface;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#dialog Select,
+#dialog Input {
+    width: 1fr;
+}

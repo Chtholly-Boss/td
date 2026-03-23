@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "td"
+version = "0.1.0"
+description = "Minimal keyboard-first tensor diff TUI for comparing two .bin files."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "textual",
+  "typer",
+]
+
+[project.scripts]
+td = "main:app"
+
+[tool.setuptools]
+py-modules = ["app", "core", "main"]
