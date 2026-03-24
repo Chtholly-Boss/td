@@ -1,6 +1,6 @@
 # td
 
-Minimal keyboard-first tensor diff TUI for inspecting one `.bin` file or comparing it against a second `.bin` file.
+Tensor Diff Tool for a keyboard-first TUI experience.
 
 ## Install
 
@@ -27,9 +27,13 @@ pyinstaller td.spec
 ```bash
 td a.bin
 td a.bin b.bin
+td a.data b.bin
+td a.npy
 td a.bin b.bin -t f32 -s 10,10
 td a.bin b.bin -s 2,2,-1
 ```
+
+`.npy` files use their embedded dtype and shape by default.
 
 ## Keys
 

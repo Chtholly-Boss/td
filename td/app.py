@@ -101,7 +101,7 @@ class TDApp(App):
         Binding("p", "prev_diff", "prev diff"),
     ]
 
-    def __init__(self, file1: str, file2: str | None, dtype: str = "f32", shape: tuple[int, ...] | None = None) -> None:
+    def __init__(self, file1: str, file2: str | None, dtype: str | None = None, shape: tuple[int, ...] | None = None) -> None:
         super().__init__()
         self.session = CompareSession(file1, file2, dtype=dtype, shape=shape)
 

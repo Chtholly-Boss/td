@@ -7,24 +7,25 @@ from typer.main import get_command_from_info
 from typer.models import CommandInfo
 
 from td.app import TDApp
-from td.core import DTYPES, parse_shape
+from td.core import DTYPES, SUPPORTED_FILE_SUFFIXES, parse_shape
 
 
 def run(
     file1: Path,
     file2: Path | None = typer.Argument(None, metavar="FILE2"),
-    dtype: str = typer.Option("f32", "--dtype", "-t"),
-    shape: str = typer.Option("auto", "--shape", "-s", help="shape like 10,10,10 or 2,-1,2 or auto"),
+    dtype: str | None = typer.Option(None, "--dtype", "-t"),
+    shape: str | None = typer.Option(None, "--shape", "-s", help="shape like 10,10,10 or 2,-1,2 or auto"),
 ) -> None:
-    dtype = dtype.lower()
-    if dtype not in DTYPES:
-        raise typer.BadParameter(f"unsupported dtype: {dtype}")
+    if dtype is not None:
+        dtype = dtype.lower()
+        if dtype not in DTYPES:
+            raise typer.BadParameter(f"unsupported dtype: {dtype}")
     for path in (file1, file2):
         if path is None:
             continue
         if not path.exists():
             raise typer.BadParameter(f"missing file: {path}")
-        if path.suffix != ".bin":
+        if path.suffix not in SUPPORTED_FILE_SUFFIXES:
             raise typer.BadParameter(f"unsupported file: {path}")
     try:
         dims = parse_shape(shape)

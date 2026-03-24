@@ -13,6 +13,8 @@ BINARY_DTYPES = {
     "b32": np.uint32,
 }
 
+SUPPORTED_FILE_SUFFIXES = {".bin", ".data", ".npy"}
+
 
 DTYPES = {
     "i8": np.int8,
@@ -28,6 +30,10 @@ DTYPES = {
     "f32": np.float32,
     "f64": np.float64,
 }
+
+NUMPY_DTYPES = {}
+for name, dtype in DTYPES.items():
+    NUMPY_DTYPES.setdefault(np.dtype(dtype), name)
 
 
 def parse_shape(shape: str | tuple[int, ...] | None) -> tuple[int, ...] | None:
@@ -105,14 +111,15 @@ class CompareSession:
         self,
         file1: str | Path,
         file2: str | Path | None,
-        dtype: str = "f32",
+        dtype: str | None = None,
         shape: str | tuple[int, ...] | None = None,
     ) -> None:
         self.file1 = Path(file1)
         self.file2 = Path(file2) if file2 is not None else None
         self.compare_mode = self.file2 is not None
-        self.original_dtype = self._parse_dtype(dtype)
-        self.original_shape_spec = parse_shape(shape)
+        inferred_dtype, inferred_shape = self._infer_initial_view()
+        self.original_dtype = self._parse_dtype(dtype or inferred_dtype or "f32")
+        self.original_shape_spec = parse_shape(inferred_shape if shape in (None, "", "auto") else shape)
         self.original_slice_spec: str | None = None
         self.original_diff_only = False
         self.dtype = self.original_dtype
@@ -128,11 +135,34 @@ class CompareSession:
             raise ValueError(f"unsupported dtype: {dtype}")
         return dtype
 
+    def _infer_initial_view(self) -> tuple[str | None, tuple[int, ...] | None]:
+        for path in (self.file1, self.file2):
+            if path is None or path.suffix != ".npy":
+                continue
+            array = np.load(path, allow_pickle=False, mmap_mode="r")
+            dtype = NUMPY_DTYPES.get(np.dtype(array.dtype))
+            if dtype is None:
+                raise ValueError(f"unsupported dtype in {path}: {array.dtype}")
+            shape = tuple(int(dim) for dim in array.shape) or (int(array.size),)
+            return dtype, shape
+        return None, None
+
+    def _load_npy_raw(self, path: Path) -> np.ndarray:
+        array = np.load(path, allow_pickle=False)
+        buffer = np.ascontiguousarray(array).tobytes()
+        dtype = np.dtype(DTYPES[self.dtype])
+        size = len(buffer) // dtype.itemsize * dtype.itemsize
+        if size == 0:
+            return np.empty(0, dtype=dtype)
+        return np.frombuffer(buffer[:size], dtype=dtype).copy()
+
     def _load_raw(self, path: Path) -> np.ndarray:
         if not path.exists():
             raise FileNotFoundError(path)
-        if path.suffix != ".bin":
+        if path.suffix not in SUPPORTED_FILE_SUFFIXES:
             raise ValueError(f"unsupported file: {path}")
+        if path.suffix == ".npy":
+            return self._load_npy_raw(path)
         return np.fromfile(path, dtype=DTYPES[self.dtype])
 
     def reload(self) -> None:
