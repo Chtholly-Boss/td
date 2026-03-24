@@ -16,6 +16,12 @@ Or install directly from GitHub without cloning:
 pip install "git+https://github.com/Chtholly-Boss/td.git"
 ```
 
+## Build a binary
+
+```bash
+pyinstaller td.spec
+```
+
 ## Run
 
 ```bash
@@ -38,5 +44,3 @@ td a.bin b.bin -s 2,2,-1
 - `q`: quit
 - `Esc`: in a prompt, cancel the current input
 - `Enter`: confirm current input
-
-

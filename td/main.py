@@ -6,8 +6,8 @@ import typer
 from typer.main import get_command_from_info
 from typer.models import CommandInfo
 
-from .app import TDApp
-from .core import DTYPES, parse_shape
+from td.app import TDApp
+from td.core import DTYPES, parse_shape
 
 
 def run(
