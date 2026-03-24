@@ -11,7 +11,7 @@ DataTable {
     height: 1fr;
 }
 
-InputScreen, DTypeScreen {
+InputScreen, DTypeScreen, ModeScreen {
     align: center middle;
 }
 

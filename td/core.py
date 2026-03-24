@@ -106,6 +106,72 @@ class Row:
         return ",".join(map(str, self.coords))
 
 
+class DiffMode:
+    key = "raw"
+    column_label = "diff"
+    requires_threshold = False
+
+    def diff_mask(self, session: CompareSession) -> np.ndarray:  # type: ignore[name-defined]
+        return ~session._raw_equal
+
+    def display_value(self, row: Row) -> str | float | None:
+        if row.equal:
+            return None
+        return "!="
+
+
+class NumericDiffMode(DiffMode):
+    requires_threshold = True
+    metric_name = "diff"
+
+    def threshold(self, session: CompareSession) -> float | None:  # type: ignore[name-defined]
+        return session.numeric_threshold(self.key)
+
+    def metric_values(self, session: CompareSession) -> np.ndarray:  # type: ignore[name-defined]
+        raise NotImplementedError
+
+    def diff_mask(self, session: CompareSession) -> np.ndarray:  # type: ignore[name-defined]
+        threshold = self.threshold(session)
+        if threshold is None:
+            raise ValueError(f"{self.key} threshold is required")
+        return self.metric_values(session) >= threshold
+
+    def display_value(self, row: Row) -> str | float | None:
+        if row.equal:
+            return None
+        return getattr(row, self.metric_name)
+
+
+class RawDiffMode(DiffMode):
+    key = "raw"
+    column_label = "diff"
+
+
+class AbsDiffMode(NumericDiffMode):
+    key = "abs"
+    column_label = "abs diff"
+    metric_name = "abs_diff"
+
+    def metric_values(self, session: CompareSession) -> np.ndarray:
+        return session._abs_diffs
+
+
+class RelDiffMode(NumericDiffMode):
+    key = "rel"
+    column_label = "rel diff"
+    metric_name = "rel_diff"
+
+    def metric_values(self, session: CompareSession) -> np.ndarray:
+        return session._rel_diffs
+
+
+DIFF_MODES = {
+    "raw": RawDiffMode(),
+    "abs": AbsDiffMode(),
+    "rel": RelDiffMode(),
+}
+
+
 class CompareSession:
     def __init__(
         self,
@@ -122,10 +188,14 @@ class CompareSession:
         self.original_shape_spec = parse_shape(inferred_shape if shape in (None, "", "auto") else shape)
         self.original_slice_spec: str | None = None
         self.original_diff_only = False
+        self.original_diff_mode_key = "raw"
+        self.original_numeric_thresholds = {"abs": None, "rel": None}
         self.dtype = self.original_dtype
         self.shape_spec = self.original_shape_spec
         self.slice_spec: str | None = None
         self.diff_only = False
+        self.diff_mode = DIFF_MODES[self.original_diff_mode_key]
+        self._numeric_thresholds = dict(self.original_numeric_thresholds)
         self.cursor = 0
         self._visible_flats: np.ndarray | None = None
         self._visible_index_by_flat: dict[int, int] | None = None
@@ -177,16 +247,30 @@ class CompareSession:
             return
 
         if self.slice_spec is None:
-            visible_flats = np.flatnonzero(~self._equal).astype(np.int64, copy=False)
+            visible_flats = np.flatnonzero(self._diff_mask).astype(np.int64, copy=False)
         else:
             slice_flats = self._slice_flats()
             if self.diff_only:
-                visible_flats = slice_flats[~self._equal[slice_flats]]
+                visible_flats = slice_flats[self._diff_mask[slice_flats]]
             else:
                 visible_flats = slice_flats
 
         self._visible_flats = np.asarray(visible_flats, dtype=np.int64).reshape(-1)
         self._visible_index_by_flat = {int(flat): index for index, flat in enumerate(self._visible_flats.tolist())}
+
+    def _rebuild_diff_state(self) -> None:
+        self._diff_mask = np.asarray(self.diff_mode.diff_mask(self), dtype=bool)
+        self._set_visible_view()
+        all_diffs = np.flatnonzero(self._diff_mask).astype(np.int64, copy=False)
+        if self._full_view or self.slice_spec is None:
+            self.diffs = all_diffs
+        else:
+            assert self._visible_flats is not None
+            self.diffs = np.sort(self._visible_flats[self._diff_mask[self._visible_flats]])
+        if self.view_size and not self.is_flat_visible(self.cursor):
+            self.cursor = self.visible_flat_at(0)
+        if not self.view_size:
+            self.cursor = 0
 
     def reload(self) -> None:
         left = self._load_raw(self.file1)
@@ -203,20 +287,20 @@ class CompareSession:
         self._flat_left = self.left.reshape(-1)
         self._flat_right = self.right.reshape(-1) if self.right is not None else None
         if self._flat_right is None:
-            self._equal = np.ones(self._flat_left.size, dtype=bool)
+            self._raw_equal = np.ones(self._flat_left.size, dtype=bool)
+            self._abs_diffs = np.zeros(self._flat_left.size, dtype=np.float64)
+            self._rel_diffs = np.zeros(self._flat_left.size, dtype=np.float64)
         else:
-            self._equal = self._equal_mask(self._flat_left, self._flat_right)
-        self._set_visible_view()
-        all_diffs = np.flatnonzero(~self._equal).astype(np.int64, copy=False)
-        if self._full_view or self.slice_spec is None:
-            self.diffs = all_diffs
-        else:
-            assert self._visible_flats is not None
-            self.diffs = np.sort(self._visible_flats[~self._equal[self._visible_flats]])
-        if self.view_size and not self.is_flat_visible(self.cursor):
-            self.cursor = self.visible_flat_at(0)
-        if not self.view_size:
-            self.cursor = 0
+            self._raw_equal = self._equal_mask(self._flat_left, self._flat_right)
+            self._abs_diffs = np.abs(self._flat_left - self._flat_right).astype(np.float64, copy=False)
+            scales = np.maximum(np.abs(self._flat_left), np.abs(self._flat_right)).astype(np.float64, copy=False)
+            self._rel_diffs = np.divide(
+                self._abs_diffs,
+                scales,
+                out=np.zeros_like(self._abs_diffs, dtype=np.float64),
+                where=scales != 0.0,
+            )
+        self._rebuild_diff_state()
 
     def _equal_mask(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
         if self.dtype.startswith("f"):
@@ -261,6 +345,22 @@ class CompareSession:
 
     def format_metric(self, value: object) -> str:
         return f"{float(value):.6g}"
+
+    @property
+    def diff_column_label(self) -> str:
+        return self.diff_mode.column_label
+
+    def diff_display_value(self, row: Row) -> str | float | None:
+        return self.diff_mode.display_value(row)
+
+    def numeric_threshold(self, mode_key: str) -> float | None:
+        return self._numeric_thresholds[mode_key]
+
+    @property
+    def active_threshold(self) -> float | None:
+        if not self.diff_mode.requires_threshold:
+            return None
+        return self.numeric_threshold(self.diff_mode.key)
 
     def diff_metrics(self, left: object, right: object, equal: bool) -> tuple[float, float]:
         if equal:
@@ -307,8 +407,9 @@ class CompareSession:
             rel_diff = 0.0
         else:
             right = self._flat_right[flat].item()
-            equal = bool(self._equal[flat])
-            abs_diff, rel_diff = self.diff_metrics(left, right, equal)
+            raw_equal = bool(self._raw_equal[flat])
+            abs_diff, rel_diff = self.diff_metrics(left, right, raw_equal)
+            equal = not bool(self._diff_mask[flat])
         return Row(
             flat=flat,
             coords=tuple(int(x) for x in np.unravel_index(flat, self.shape)),
@@ -374,6 +475,35 @@ class CompareSession:
         self.cursor = int(self.diffs[index]) if index >= 0 else int(self.diffs[-1])
         return True
 
+    def set_diff_mode(self, mode_key: str, threshold: float | None = None) -> None:
+        if mode_key not in DIFF_MODES:
+            raise ValueError(f"unsupported diff mode: {mode_key}")
+        previous_mode = self.diff_mode
+        previous_thresholds = dict(self._numeric_thresholds)
+        previous_cursor = self.cursor
+        mode = DIFF_MODES[mode_key]
+        if threshold is not None:
+            self.set_numeric_threshold(mode_key, threshold)
+        if mode.requires_threshold and self.numeric_threshold(mode_key) is None:
+            raise ValueError(f"{mode_key} threshold is required")
+        self.diff_mode = mode
+        try:
+            self._rebuild_diff_state()
+        except Exception:
+            self.diff_mode = previous_mode
+            self._numeric_thresholds = previous_thresholds
+            self.cursor = previous_cursor
+            self._rebuild_diff_state()
+            raise
+
+    def set_numeric_threshold(self, mode_key: str, threshold: float) -> None:
+        if mode_key not in DIFF_MODES or not DIFF_MODES[mode_key].requires_threshold:
+            raise ValueError(f"{mode_key} does not use a threshold")
+        value = float(threshold)
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"invalid threshold: {threshold}")
+        self._numeric_thresholds[mode_key] = value
+
     def set_dtype(self, dtype: str) -> None:
         previous_dtype = self.dtype
         previous_cursor = self.cursor
@@ -428,5 +558,7 @@ class CompareSession:
         self.shape_spec = self.original_shape_spec
         self.slice_spec = self.original_slice_spec
         self.diff_only = self.original_diff_only
+        self.diff_mode = DIFF_MODES[self.original_diff_mode_key]
+        self._numeric_thresholds = dict(self.original_numeric_thresholds)
         self.cursor = 0
         self.reload()

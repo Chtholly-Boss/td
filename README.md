@@ -35,13 +35,24 @@ td a.bin b.bin -s 2,2,-1
 
 `.npy` files use their embedded dtype and shape by default.
 
+## Diff Modes
+
+Press `m` to choose how `td` decides whether a row is a diff:
+
+- `raw`: any unequal values are diffs
+- `abs`: a row is a diff when its absolute difference meets or exceeds the chosen threshold
+- `rel`: a row is a diff when its relative difference meets or exceeds the chosen threshold
+
+`abs` and `rel` prompt for a threshold when selected. Each numeric mode remembers its last threshold for the current session.
+
 ## Keys
 
 - `Arrow Up` / `Arrow Down`: move
 - `g`: goto flat index or coordinates
-- `n` / `p`: next / previous diff
+- `n` / `p`: next / previous diff in the active diff mode
 - `s`: slice view, for example `0:63` or `1, 0:63`
-- `d`: toggle a diff-only view
+- `d`: toggle a diff-only view for the active diff mode
+- `m`: choose the diff mode (`raw`, `abs`, or `rel`)
 - `t`: change dtype
 - `r`: reshape, for example `2,-1` to reshape a `[100]` tensor to `[2,50]`
 - `Esc`: on the main screen, reset to the original dtype, shape, and full view

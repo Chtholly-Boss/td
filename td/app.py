@@ -8,7 +8,7 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Label, Select, Static
 
-from .core import CompareSession, DTYPES
+from .core import CompareSession, DIFF_MODES, DTYPES
 
 
 class InputScreen(ModalScreen[str | None]):
@@ -86,6 +86,44 @@ class DTypeScreen(ModalScreen[str | None]):
             self.dismiss(str(event.value))
 
 
+class ModeScreen(ModalScreen[str | None]):
+    BINDINGS = [
+        Binding("escape", "cancel", show=False),
+    ]
+
+    def __init__(self, default: str, choices: tuple[str, ...]) -> None:
+        super().__init__()
+        self.default = default
+        self.choices = choices
+        self._ready = False
+
+    def compose(self) -> ComposeResult:
+        with Container(id="dialog", classes="mode-dialog"):
+            yield Label("diff mode")
+            yield Select.from_values(
+                self.choices,
+                value=self.default,
+                allow_blank=False,
+                id="mode-field",
+            )
+
+    def on_mount(self) -> None:
+        self.call_after_refresh(self._activate_select)
+
+    def _activate_select(self) -> None:
+        select = self.query_one(Select)
+        select.focus()
+        select.action_show_overlay()
+        self._ready = True
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if self._ready and event.value != Select.NULL:
+            self.dismiss(str(event.value))
+
+
 class TDApp(App):
     TITLE = "td"
     CSS = ""
@@ -104,6 +142,7 @@ class TDApp(App):
         Binding("g", "goto", "goto"),
         Binding("s", "set_slice", "slice"),
         Binding("d", "toggle_diff_only", "diff-only"),
+        Binding("m", "set_diff_mode", "mode"),
         Binding("t", "set_dtype", "dtype"),
         Binding("r", "reshape", "reshape"),
         Binding("n", "next_diff", "next diff"),
@@ -115,6 +154,7 @@ class TDApp(App):
         self.session = CompareSession(file1, file2, dtype=dtype, shape=shape)
         self._window_start = 0
         self._window_end = 0
+        self._pending_mode_key: str | None = None
 
     def compose(self) -> ComposeResult:
         yield DataTable(id="table")
@@ -128,6 +168,11 @@ class TDApp(App):
         table.focus()
         self.refresh_table()
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if self.screen is not self.screen_stack[0]:
+            return False
+        return super().check_action(action, parameters)
+
     def refresh_table(self) -> None:
         table = self.query_one(DataTable)
         table.clear(columns=True)
@@ -136,27 +181,23 @@ class TDApp(App):
             "coord",
             self.session.file1.name,
             self.session.file2.name if self.session.file2 is not None else "",
-            "abs diff",
-            "rel diff",
+            self.session.diff_column_label,
         )
         self._window_start, self._window_end = self._window_bounds()
         for row in self.session.rows_for_view(self._window_start, self._window_end):
             left = self._cell(row.left, row.equal)
             if self.session.compare_mode:
                 right = self._cell(row.right, row.equal)
-                abs_diff = self._metric_cell(row.abs_diff, row.equal)
-                rel_diff = self._metric_cell(row.rel_diff, row.equal)
+                diff_value = self._diff_cell(row)
             else:
                 right = Text("")
-                abs_diff = Text("")
-                rel_diff = Text("")
+                diff_value = Text("")
             table.add_row(
                 str(row.flat),
                 row.coords_text,
                 left,
                 right,
-                abs_diff,
-                rel_diff,
+                diff_value,
                 key=str(row.flat),
             )
         self._sync_cursor()
@@ -193,6 +234,16 @@ class TDApp(App):
         style = "" if equal else "bold red"
         return Text(self.session.format_metric(value), style=style)
 
+    def _diff_cell(self, row) -> Text:
+        value = self.session.diff_display_value(row)
+        if value is None:
+            return Text("")
+        if isinstance(value, str):
+            rendered = value
+        else:
+            rendered = self.session.format_metric(value)
+        return Text(rendered, style="bold red")
+
     def _status_text(self) -> str:
         parts = []
         if self.session.view_size:
@@ -206,6 +257,9 @@ class TDApp(App):
                 f"shape {self.session.shape_text}",
             ]
         )
+        parts.append(f"mode {self.session.diff_mode.key}")
+        if self.session.active_threshold is not None:
+            parts.append(f"threshold {self.session.format_metric(self.session.active_threshold)}")
         if self.session.slice_spec:
             parts.append(f"slice {self.session.slice_spec}")
         if self.session.diff_only:
@@ -223,6 +277,7 @@ class TDApp(App):
             ("g", "goto"),
             ("s", "slice"),
             ("d", "diff-only"),
+            ("m", "mode"),
             ("Esc", "reset"),
             ("n/p", "diff"),
             ("t", "dtype"),
@@ -327,6 +382,44 @@ class TDApp(App):
 
     def action_set_dtype(self) -> None:
         self.push_screen(DTypeScreen(self.session.dtype, tuple(DTYPES)), self._apply_dtype)
+
+    def action_set_diff_mode(self) -> None:
+        self.push_screen(ModeScreen(self.session.diff_mode.key, tuple(DIFF_MODES)), self._apply_diff_mode)
+
+    def _apply_diff_mode(self, value: str | None) -> None:
+        if value is None:
+            return
+        try:
+            needs_threshold = DIFF_MODES[value].requires_threshold
+            current_threshold = self.session.numeric_threshold(value) if needs_threshold else None
+            if needs_threshold and (value == self.session.diff_mode.key or current_threshold is None):
+                self._pending_mode_key = value
+                default = "" if current_threshold is None else self.session.format_metric(current_threshold)
+                self._prompt(
+                    f"{value} threshold",
+                    default,
+                    "0.01",
+                    self._apply_mode_threshold,
+                    dialog_class="threshold-dialog",
+                )
+                return
+            self.session.set_diff_mode(value)
+            self.refresh_table()
+        except Exception as error:
+            self._pending_mode_key = None
+            self._update_status(f"error: {error}")
+
+    def _apply_mode_threshold(self, value: str | None) -> None:
+        mode_key = self._pending_mode_key
+        self._pending_mode_key = None
+        if value is None or mode_key is None:
+            return
+        try:
+            threshold = float(value.strip())
+            self.session.set_diff_mode(mode_key, threshold=threshold)
+            self.refresh_table()
+        except Exception as error:
+            self._update_status(f"error: {error}")
 
     def _apply_dtype(self, value: str | None) -> None:
         if value is None:
