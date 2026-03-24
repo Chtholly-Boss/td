@@ -15,7 +15,10 @@ dependencies = [
 ]
 
 [project.scripts]
-td = "main:app"
+td = "td.main:app"
 
 [tool.setuptools]
-py-modules = ["app", "core", "main"]
+packages = ["td"]
+
+[tool.setuptools.package-data]
+td = ["app.tcss"]

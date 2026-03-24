@@ -8,7 +8,7 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Label, Select, Static
 
-from core import CompareSession, DTYPES
+from .core import CompareSession, DTYPES
 
 
 class InputScreen(ModalScreen[str | None]):
