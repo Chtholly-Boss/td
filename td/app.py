@@ -70,10 +70,12 @@ class DTypeScreen(ModalScreen[str | None]):
             )
 
     def on_mount(self) -> None:
-        self.query_one(Select).focus()
-        self.call_after_refresh(self._mark_ready)
+        self.call_after_refresh(self._activate_select)
 
-    def _mark_ready(self) -> None:
+    def _activate_select(self) -> None:
+        select = self.query_one(Select)
+        select.focus()
+        select.action_show_overlay()
         self._ready = True
 
     def action_cancel(self) -> None:
@@ -88,8 +90,15 @@ class TDApp(App):
     TITLE = "td"
     CSS = ""
     CSS_PATH = "app.tcss"
+    TABLE_WINDOW_ROWS = 1000
 
     BINDINGS = [
+        Binding("up", "cursor_up", show=False, priority=True),
+        Binding("down", "cursor_down", show=False, priority=True),
+        Binding("pageup", "page_up", show=False, priority=True),
+        Binding("pagedown", "page_down", show=False, priority=True),
+        Binding("home", "cursor_home", show=False, priority=True),
+        Binding("end", "cursor_end", show=False, priority=True),
         Binding("q", "quit", "quit"),
         Binding("escape", "reset", "reset"),
         Binding("g", "goto", "goto"),
@@ -104,6 +113,8 @@ class TDApp(App):
     def __init__(self, file1: str, file2: str | None, dtype: str | None = None, shape: tuple[int, ...] | None = None) -> None:
         super().__init__()
         self.session = CompareSession(file1, file2, dtype=dtype, shape=shape)
+        self._window_start = 0
+        self._window_end = 0
 
     def compose(self) -> ComposeResult:
         yield DataTable(id="table")
@@ -128,7 +139,8 @@ class TDApp(App):
             "abs diff",
             "rel diff",
         )
-        for row in self.session.rows():
+        self._window_start, self._window_end = self._window_bounds()
+        for row in self.session.rows_for_view(self._window_start, self._window_end):
             left = self._cell(row.left, row.equal)
             if self.session.compare_mode:
                 right = self._cell(row.right, row.equal)
@@ -149,10 +161,23 @@ class TDApp(App):
             )
         self._sync_cursor()
 
+    def _window_bounds(self) -> tuple[int, int]:
+        total = self.session.view_size
+        if total <= 0:
+            return 0, 0
+        limit = min(self.TABLE_WINDOW_ROWS, total)
+        start = max(0, self.session.view_row - limit // 2)
+        end = min(total, start + limit)
+        start = max(0, end - limit)
+        return start, end
+
     def _sync_cursor(self) -> None:
         table = self.query_one(DataTable)
         if self.session.view_size:
-            table.move_cursor(row=self.session.view_row, column=0)
+            if not self._window_start <= self.session.view_row < self._window_end:
+                self.refresh_table()
+                return
+            table.move_cursor(row=self.session.view_row - self._window_start, column=0)
         self._update_status()
 
     def _update_status(self, message: str | None = None) -> None:
@@ -230,8 +255,39 @@ class TDApp(App):
         )
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        self.session.goto_view_row(event.cursor_row)
+        if self.session.view_size == 0:
+            self._update_status()
+            return
+        row = self._window_start + event.cursor_row
+        if 0 <= row < self.session.view_size:
+            self.session.goto_view_row(row)
         self._update_status()
+
+    def _move_cursor(self, delta: int) -> None:
+        self.session.move(delta)
+        self._sync_cursor()
+
+    def action_cursor_up(self) -> None:
+        self._move_cursor(-1)
+
+    def action_cursor_down(self) -> None:
+        self._move_cursor(1)
+
+    def action_page_up(self) -> None:
+        self._move_cursor(-(max(1, self.TABLE_WINDOW_ROWS - 1)))
+
+    def action_page_down(self) -> None:
+        self._move_cursor(max(1, self.TABLE_WINDOW_ROWS - 1))
+
+    def action_cursor_home(self) -> None:
+        if self.session.view_size:
+            self.session.goto_view_row(0)
+            self._sync_cursor()
+
+    def action_cursor_end(self) -> None:
+        if self.session.view_size:
+            self.session.goto_view_row(self.session.view_size - 1)
+            self._sync_cursor()
 
     def action_goto(self) -> None:
         self._prompt("goto flat index or coords", ",".join(map(str, self.session.coords)), "12 or 1,2", self._apply_goto)

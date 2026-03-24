@@ -127,6 +127,10 @@ class CompareSession:
         self.slice_spec: str | None = None
         self.diff_only = False
         self.cursor = 0
+        self._visible_flats: np.ndarray | None = None
+        self._visible_index_by_flat: dict[int, int] | None = None
+        self._full_view = True
+        self.diffs = np.empty(0, dtype=np.int64)
         self.reload()
 
     def _parse_dtype(self, dtype: str) -> str:
@@ -165,6 +169,25 @@ class CompareSession:
             return self._load_npy_raw(path)
         return np.fromfile(path, dtype=DTYPES[self.dtype])
 
+    def _set_visible_view(self) -> None:
+        self._full_view = self.slice_spec is None and not self.diff_only
+        if self._full_view:
+            self._visible_flats = None
+            self._visible_index_by_flat = None
+            return
+
+        if self.slice_spec is None:
+            visible_flats = np.flatnonzero(~self._equal).astype(np.int64, copy=False)
+        else:
+            slice_flats = self._slice_flats()
+            if self.diff_only:
+                visible_flats = slice_flats[~self._equal[slice_flats]]
+            else:
+                visible_flats = slice_flats
+
+        self._visible_flats = np.asarray(visible_flats, dtype=np.int64).reshape(-1)
+        self._visible_index_by_flat = {int(flat): index for index, flat in enumerate(self._visible_flats.tolist())}
+
     def reload(self) -> None:
         left = self._load_raw(self.file1)
         right = self._load_raw(self.file2) if self.compare_mode and self.file2 is not None else None
@@ -183,12 +206,16 @@ class CompareSession:
             self._equal = np.ones(self._flat_left.size, dtype=bool)
         else:
             self._equal = self._equal_mask(self._flat_left, self._flat_right)
-        self._visible_flats = self._visible_flats_for_view()
-        self._visible_index_by_flat = {flat: index for index, flat in enumerate(self._visible_flats)}
-        self.diffs = [flat for flat in np.flatnonzero(~self._equal).astype(int).tolist() if flat in self._visible_index_by_flat]
-        if self._visible_flats and self.cursor not in self._visible_index_by_flat:
-            self.cursor = self._visible_flats[0]
-        if not self._visible_flats:
+        self._set_visible_view()
+        all_diffs = np.flatnonzero(~self._equal).astype(np.int64, copy=False)
+        if self._full_view or self.slice_spec is None:
+            self.diffs = all_diffs
+        else:
+            assert self._visible_flats is not None
+            self.diffs = np.sort(self._visible_flats[~self._equal[self._visible_flats]])
+        if self.view_size and not self.is_flat_visible(self.cursor):
+            self.cursor = self.visible_flat_at(0)
+        if not self.view_size:
             self.cursor = 0
 
     def _equal_mask(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
@@ -207,7 +234,7 @@ class CompareSession:
 
     @property
     def view_size(self) -> int:
-        return len(self._visible_flats)
+        return self.size if self._full_view else len(self._visible_flats)
 
     @property
     def shape_text(self) -> str:
@@ -219,8 +246,11 @@ class CompareSession:
 
     @property
     def view_row(self) -> int:
-        if not self._visible_flats:
+        if not self.view_size:
             return 0
+        if self._full_view:
+            return self.cursor
+        assert self._visible_index_by_flat is not None
         return self._visible_index_by_flat[self.cursor]
 
     def format_value(self, value: object) -> str:
@@ -240,23 +270,33 @@ class CompareSession:
         rel_diff = 0.0 if scale == 0.0 else abs_diff / scale
         return abs_diff, rel_diff
 
-    def _slice_flats(self) -> list[int]:
+    def _slice_flats(self) -> np.ndarray:
         selection = parse_slice_spec(self.slice_spec, len(self.shape))
         indices = np.arange(self.size).reshape(self.shape)
         try:
             selected = indices[selection]
         except (IndexError, TypeError, ValueError) as error:
             raise ValueError(f"invalid slice: {self.slice_spec}") from error
-        flats = np.asarray(selected, dtype=int).reshape(-1).tolist()
-        if not flats:
+        flats = np.asarray(selected, dtype=np.int64).reshape(-1)
+        if flats.size == 0:
             raise ValueError(f"slice matched no elements: {self.slice_spec}")
-        return [int(flat) for flat in flats]
-
-    def _visible_flats_for_view(self) -> list[int]:
-        flats = self._slice_flats()
-        if self.diff_only:
-            return [flat for flat in flats if not self._equal[flat]]
         return flats
+
+    def is_flat_visible(self, flat: int) -> bool:
+        if not 0 <= flat < self.size:
+            return False
+        if self._full_view:
+            return True
+        assert self._visible_index_by_flat is not None
+        return flat in self._visible_index_by_flat
+
+    def visible_flat_at(self, index: int) -> int:
+        if not 0 <= index < self.view_size:
+            raise ValueError(f"row out of range: {index}")
+        if self._full_view:
+            return index
+        assert self._visible_flats is not None
+        return int(self._visible_flats[index])
 
     def row(self, flat: int) -> Row:
         left = self._flat_left[flat].item()
@@ -279,24 +319,31 @@ class CompareSession:
             equal=equal,
         )
 
+    def rows_for_view(self, start: int = 0, stop: int | None = None) -> list[Row]:
+        if stop is None:
+            stop = self.view_size
+        start = max(0, start)
+        stop = min(stop, self.view_size)
+        if start >= stop:
+            return []
+        return [self.row(self.visible_flat_at(index)) for index in range(start, stop)]
+
     def rows(self) -> list[Row]:
-        return [self.row(flat) for flat in self._visible_flats]
+        return self.rows_for_view()
 
     def move(self, delta: int) -> None:
-        if not self._visible_flats:
+        if self.view_size == 0:
             return
         row_index = min(max(self.view_row + delta, 0), self.view_size - 1)
-        self.cursor = self._visible_flats[row_index]
+        self.cursor = self.visible_flat_at(row_index)
 
     def goto_view_row(self, row: int) -> None:
-        if not 0 <= row < self.view_size:
-            raise ValueError(f"row out of range: {row}")
-        self.cursor = self._visible_flats[row]
+        self.cursor = self.visible_flat_at(row)
 
     def goto_flat(self, flat: int) -> None:
         if not 0 <= flat < self.size:
             raise ValueError(f"index out of range: {flat}")
-        if flat not in self._visible_index_by_flat:
+        if not self.is_flat_visible(flat):
             raise ValueError(f"index not visible: {flat}")
         self.cursor = flat
 
@@ -314,15 +361,17 @@ class CompareSession:
         self.cursor = int(np.ravel_multi_index(coords, self.shape))
 
     def next_diff(self) -> bool:
-        if not self.diffs:
+        if len(self.diffs) == 0:
             return False
-        self.cursor = next((diff for diff in self.diffs if diff > self.cursor), self.diffs[0])
+        index = int(np.searchsorted(self.diffs, self.cursor, side="right"))
+        self.cursor = int(self.diffs[index]) if index < len(self.diffs) else int(self.diffs[0])
         return True
 
     def prev_diff(self) -> bool:
-        if not self.diffs:
+        if len(self.diffs) == 0:
             return False
-        self.cursor = next((diff for diff in reversed(self.diffs) if diff < self.cursor), self.diffs[-1])
+        index = int(np.searchsorted(self.diffs, self.cursor, side="left")) - 1
+        self.cursor = int(self.diffs[index]) if index >= 0 else int(self.diffs[-1])
         return True
 
     def set_dtype(self, dtype: str) -> None:
