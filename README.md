@@ -2,6 +2,8 @@
 
 Tensor Diff Tool for a keyboard-first TUI experience.
 
+![presentation](https://github.com/user-attachments/assets/29757103-8add-4dd9-8987-620277e6af9f)
+
 ## Install
 
 From a local clone:
